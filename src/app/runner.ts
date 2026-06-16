@@ -1,0 +1,367 @@
+// Run user scripts.
+import Interpreter from "js-interpreter"
+import * as acorn from "acorn"
+import * as walk from "acorn-walk"
+import i18n from "i18next"
+import Sk from "skulpt"
+
+import { NodeVisitor } from "./ast"
+import * as audioLibrary from "./audiolibrary"
+import * as javascriptAPI from "../api/earsketch.js"
+import * as pythonAPI from "../api/earsketch.py"
+import esconsole from "../esconsole"
+import { postRun } from "./postRun"
+import { Language } from "common"
+import { DANCE_MOVE_CONSTANTS } from "../dance/danceConstants"
+import { AVATAR_CONSTANTS } from "../dance/avatarConstants"
+
+// For interrupting the currently-executing script.
+let pendingCancel = false
+export function cancel() {
+    pendingCancel = true
+}
+
+function checkCancel() {
+    const cancel = pendingCancel
+    pendingCancel = false
+    return cancel
+}
+
+// How often the script yields the main thread (for UI interactions, interrupts, etc.).
+const YIELD_TIME_MS = 100
+
+export async function run(language: Language, code: string) {
+    pendingCancel = false // Clear any old, pending cancellation.
+    const result = await (language === "python" ? runPython : runJavaScript)(code)
+    esconsole("Performing post-execution steps.", ["debug", "runner"])
+    await postRun(result)
+    esconsole("Post-execution steps finished. Return result.", ["debug", "runner"])
+    return result
+}
+
+const SOUND_CONSTANT_PATTERN = /^[A-Z0-9][A-Z0-9_]*$/
+
+class SoundConstantFinder extends NodeVisitor {
+    constants: string[] = []
+
+    visitName(node: any) {
+        // If this identifier matches the naming scheme for sound constants, add it to the list.
+        const name = node.id.v
+        if (SOUND_CONSTANT_PATTERN.test(name)) {
+            this.constants.push(name)
+        }
+    }
+}
+
+// Searches for identifiers that might be sound constants, verifies with the server, and inserts into globals.
+function handleDanceMoveConstantsPython() {
+    for (const [constantName, moveName] of Object.entries(DANCE_MOVE_CONSTANTS)) {
+        Sk.builtins[constantName] = Sk.ffi.remapToPy(moveName)
+    }
+}
+
+function handleAvatarConstantsPython() {
+    for (const [constantName, avatarName] of Object.entries(AVATAR_CONSTANTS)) {
+        Sk.builtins[constantName] = Sk.ffi.remapToPy(avatarName)
+    }
+}
+
+async function handleSoundConstantsPython(code: string) {
+    // First, inject sound constants that refer to folders, since the server doesn't handle them on the metadata endpoint.
+    for (const constant of (await audioLibrary.getStandardSounds()).folders) {
+        Sk.builtins[constant] = Sk.ffi.remapToPy(constant)
+    }
+
+    const finder = new SoundConstantFinder()
+    const parse = Sk.parse("<analyzer>", code)
+    finder.visit(Sk.astFromParse(parse.cst, "<analyzer>", parse.flags))
+    const possibleSoundConstants = finder.constants.filter(c => Sk.builtins[c] === undefined)
+
+    const sounds = await Promise.all(possibleSoundConstants.map(audioLibrary.getMetadata))
+    for (const sound of sounds) {
+        if (sound) {
+            Sk.builtins[sound.name] = Sk.ffi.remapToPy(sound.name)
+        }
+    }
+}
+
+function _getSourceLines(): number[] {
+    throw new Error("Called getSourceLines() outside of script execution")
+}
+function _getLineNumber(): number {
+    throw new Error("Called getLineNumber() outside of script execution")
+}
+// User-meaningful call stack (innermost first). Used for source→DAW highlighting.
+export let getSourceLines: () => number[] = _getSourceLines
+// Current statement line. Used for error attribution; matches getSourceLines()[0] in the
+// normal case but stays defined when the top of stack is not a CallExpression.
+export let getLineNumber: () => number = _getLineNumber
+
+function findFutureImportsPython(code: string) {
+    const lines = code.split("\n")
+    let seenCode = false
+    const futureImports = []
+
+    for (const [i, line] of lines.entries()) {
+        const lineNo = i + 1
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith("#")) continue
+
+        const match = /^from __future__ import (.+)/.exec(trimmed)
+        if (match) {
+            if (seenCode) {
+                throw new Sk.builtin.SyntaxError("from __future__ imports must occur at the beginning of the file", undefined, lineNo)
+            }
+            const imports = match[1].split(/\s*,\s*/)
+            futureImports.push(...imports.map(name => ({ lineNo, name })))
+        } else {
+            seenCode = true
+        }
+    }
+
+    return futureImports
+}
+
+// Run a python script.
+async function runPython(code: string) {
+    Sk.dateSet = false
+    Sk.filesLoaded = false
+    // Added to reset imports
+    // eslint-disable-next-line new-cap
+    Sk.sysmodules = new Sk.builtin.dict([])
+    Sk.realsyspath = undefined
+
+    Sk.resetCompiler()
+    // Check for imitation future statement to determine Python version
+    let version: 2 | 3 = 2
+    const futureImports = findFutureImportsPython(code)
+    for (const { lineNo, name } of futureImports) {
+        if (name === "python3") {
+            version = 3
+        } else {
+            throw new Sk.builtin.SyntaxError(`future feature ${name} is not defined`, undefined, lineNo)
+        }
+    }
+
+    pythonAPI.setup(version)
+    Sk.yieldLimit = YIELD_TIME_MS
+
+    // special cases with these key functions when import ES module is missing
+    // this hack is only for the user guidance
+    // eslint-disable-next-line new-cap
+    Sk.builtins.init = new Sk.builtin.func(() => {
+        throw new Error("init()" + i18n.t("messages:interpreter.noimport"))
+    })
+    // eslint-disable-next-line new-cap
+    Sk.builtins.finish = new Sk.builtin.func(() => {
+        throw new Error("finish()" + i18n.t("messages:interpreter.noimport"))
+    })
+
+    await handleSoundConstantsPython(code)
+    handleDanceMoveConstantsPython()
+    handleAvatarConstantsPython()
+
+    const lines = code.match(/\n/g) ? code.match(/\n/g)!.length + 1 : 1
+    esconsole("Running " + lines + " lines of Python", ["debug", "runner"])
+
+    esconsole("Running script using Skulpt.", ["debug", "runner"])
+    let sourceLines: number[] = []
+    getSourceLines = () => [...sourceLines]
+    getLineNumber = () => sourceLines[0] ?? 0
+    const promiseHandler = (susp: any) => {
+        // Walk the suspension chain (outermost frame to innermost via .child) and
+        // collect user-frame line numbers innermost-first.
+        const lines: number[] = []
+        while (susp !== undefined) {
+            if (susp.$lineno != null) lines.unshift(susp.$lineno)
+            susp = susp.child
+        }
+        sourceLines = lines
+        return null // fallback to default behavior
+    }
+    const yieldHandler = (susp: any) => new Promise((resolve, reject) => {
+        if (checkCancel()) {
+            // We do this to ensure the exception is raised from within the program.
+            // This allows the user to see where the code was interrupted
+            // (and potentially catch the exception, like a KeyboardInterrupt!).
+            susp.child.child.resume = () => {
+                throw new Sk.builtin.RuntimeError("User interrupted execution")
+            }
+        }
+        // Use `setTimeout` to give the event loop the chance to run other tasks.
+        window.setTimeout(() => {
+            try {
+                resolve(susp.resume())
+            } catch (e) {
+                reject(e)
+            }
+        })
+    })
+
+    await Sk.misceval.asyncToPromise(() => {
+        try {
+            return Sk.importModuleInternal_("<stdin>", false, "__main__", code, undefined, false, true)
+        } catch (err) {
+            esconsole(err, ["error", "runner"])
+            throw err
+        }
+    }, { "Sk.yield": yieldHandler, "Sk.promise": promiseHandler }).finally(() => {
+        getSourceLines = _getSourceLines
+        getLineNumber = _getLineNumber
+    })
+
+    esconsole("Execution finished. Extracting result.", ["debug", "runner"])
+    return Sk.ffi.remapToJs(pythonAPI.dawData)
+}
+
+// Searches for identifiers that might be sound constants, verifies with the server, and inserts into globals.
+async function handleSoundConstantsJavaScript(code: string, interpreter: any) {
+    // First, inject sound constants that refer to folders, since the server doesn't handle them on the metadata endpoint.
+    const scope = interpreter.getScope().object
+    for (const constant of (await audioLibrary.getStandardSounds()).folders) {
+        interpreter.setProperty(scope, constant, constant)
+    }
+
+    const constants: string[] = []
+
+    walk.simple(acorn.parse(code, { ecmaVersion: 5 }), {
+        Identifier(node: any) {
+            if (SOUND_CONSTANT_PATTERN.test(node.name)) {
+                constants.push(node.name)
+            }
+        },
+    })
+
+    const possibleSoundConstants = constants.filter(c => interpreter.getProperty(scope, c) === undefined)
+
+    const sounds = await Promise.all(possibleSoundConstants.map(audioLibrary.getMetadata))
+    for (const sound of sounds) {
+        if (sound) {
+            interpreter.setProperty(scope, sound.name, sound.name)
+        }
+    }
+}
+
+function handleDanceMoveConstantsJavaScript(interpreter: any) {
+    const scope = interpreter.getScope().object
+    for (const [constantName, moveName] of Object.entries(DANCE_MOVE_CONSTANTS)) {
+        interpreter.setProperty(scope, constantName, moveName)
+    }
+}
+
+function handleAvatarConstantsJavaScript(interpreter: any) {
+    const scope = interpreter.getScope().object
+    for (const [constantName, avatarName] of Object.entries(AVATAR_CONSTANTS)) {
+        interpreter.setProperty(scope, constantName, avatarName)
+    }
+}
+
+function createJsInterpreter(code: string) {
+    let interpreter
+    try {
+        interpreter = new Interpreter(code, javascriptAPI.setup)
+    } catch (e: any) {
+        if (e.loc !== undefined) {
+            // acorn provides line numbers for syntax errors
+            e.message += " on line " + e.loc.line
+            e.lineNumber = e.loc.line
+        }
+        throw e
+    }
+
+    // Run regular expressions in main thread instead of in workers;
+    // see https://github.com/GTCMT/earsketch-webclient/pull/466.
+    interpreter.REGEXP_MODE = 1
+    interpreter.globalScope.strict = true // always enable strict mode
+    return interpreter
+}
+
+// Compile a javascript script.
+async function runJavaScript(code: string) {
+    esconsole("Running script using JS-Interpreter.", ["debug", "runner"])
+    const mainInterpreter = createJsInterpreter(code)
+    await handleSoundConstantsJavaScript(code, mainInterpreter)
+    handleDanceMoveConstantsJavaScript(mainInterpreter)
+    handleAvatarConstantsJavaScript(mainInterpreter)
+    getLineNumber = () => {
+        const stateStack = mainInterpreter.stateStack
+        return stateStack[stateStack.length - 1].node?.loc?.start?.line ?? 0
+    }
+    getSourceLines = () => {
+        const stateStack = mainInterpreter.stateStack
+        // Walk top-of-stack (innermost) downward, keeping one entry per CallExpression
+        // frame (call sites are the user-meaningful frames; block/program nodes are noise).
+        const lines: number[] = []
+        let prevLine: number | undefined
+        for (let i = stateStack.length - 1; i >= 0; i--) {
+            const node = stateStack[i].node
+            if (node?.type !== "CallExpression") continue
+            const line = node.loc?.start?.line
+            if (line != null && line !== prevLine) {
+                lines.push(line)
+                prevLine = line
+            }
+        }
+        return lines
+    }
+    try {
+        return await runJsInterpreter(mainInterpreter)
+    } finally {
+        getSourceLines = _getSourceLines
+        getLineNumber = _getLineNumber
+    }
+}
+
+function sleep(ms: number) {
+    return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+// This is a helper function for running JS-Interpreter to allow for script
+// interruption and to handle breaks in execution due to asynchronous calls.
+async function runJsInterpreter(interpreter: any) {
+    const runSteps = () => {
+        // Run interpreter for up to `YIELD_TIME_MS` milliseconds.
+        // Returns early if blocked on async call or if script finishes.
+        const start = Date.now()
+        while ((Date.now() - start < YIELD_TIME_MS) && !interpreter.paused_) {
+            // Take note of line number in case of error.
+            // (We need to do this before stepping because the stack is unwound when an error is thrown.)
+            const lineNumber = getLineNumber()
+            try {
+                if (!interpreter.step()) return false
+            } catch (e: any) {
+                throw attachLineToError(e, lineNumber)
+            }
+        }
+        return true
+    }
+
+    while (runSteps()) {
+        if (checkCancel()) {
+            // Raise an exception from within the program.
+            const error = interpreter.createObject(interpreter.ERROR)
+            interpreter.setProperty(error, "name", "InterruptError", Interpreter.NONENUMERABLE_DESCRIPTOR)
+            interpreter.setProperty(error, "message", "User interrupted execution", Interpreter.NONENUMERABLE_DESCRIPTOR)
+            interpreter.unwind(Interpreter.Completion.THROW, error, undefined)
+            interpreter.paused_ = false
+        }
+        if (javascriptAPI.asyncError) {
+            throw javascriptAPI.popAsyncError()
+        }
+        // Give the event loop the chance to run other tasks.
+        await sleep(0)
+    }
+    const result = javascriptAPI.dawData
+    esconsole("Execution finished. Extracting result.", ["debug", "runner"])
+    return javascriptAPI.remapToNative(result)
+}
+
+function attachLineToError(error: Error | string, lineNumber: number): Error {
+    if (typeof error === "string") {
+        // JS-Interpreter sometimes throws strings; wrap them in an Error so we can attach `lineNumber`
+        error = new EvalError(error)
+    }
+    error.message += " on line " + lineNumber;
+    (error as any).lineNumber = lineNumber
+    return error
+}

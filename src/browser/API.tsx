@@ -1,0 +1,202 @@
+import { useState, ChangeEvent, useMemo } from "react"
+import { useSelector, useDispatch } from "react-redux"
+import { useTranslation } from "react-i18next"
+
+import { BrowserTabType } from "./BrowserTab"
+import * as api from "./apiState"
+import type { APIItem, APIParameter } from "../api/api"
+import { selectScriptLanguage } from "../app/appState"
+
+import { SearchBar, analyzeJavaScriptCode, analyzePythonCode } from "./Utils"
+import * as editor from "../ide/Editor"
+import * as tabs from "../ide/tabState"
+import * as cai from "../cai/caiState"
+import { addUIClick } from "../cai/dialogue/student"
+import { highlight } from "../ide/highlight"
+import { Language } from "common"
+
+const Code = ({ source, language }: { source: string, language: Language }) => {
+    const { light, dark } = highlight(source, language)
+    const { t } = useTranslation()
+    const getAriaLabel = useMemo(() => {
+        if (language === "python") {
+            return analyzePythonCode(source, t)
+        } else if (language === "javascript") {
+            return analyzeJavaScriptCode(source, t)
+        } else {
+            return "Code Example"
+        }
+    }, [source, language, t])
+
+    return <>
+        <code aria-label={getAriaLabel} className={language + " whitespace-pre overflow-x-auto block dark:hidden"}>
+            {light}
+        </code>
+        <code aria-label={getAriaLabel} className={language + " whitespace-pre overflow-x-auto hidden dark:block"}>
+            {dark}
+        </code>
+    </>
+}
+
+// Hack from https://stackoverflow.com/questions/46240647/react-how-to-force-a-function-component-to-render
+// TODO: Get rid of this by moving obj.details into Redux state.
+function useForceUpdate() {
+    const [_, setValue] = useState(0) // integer state
+    return () => setValue(value => ++value) // update the state to force render
+}
+
+const paste = (name: string, obj: APIItem) => {
+    const args: string[] = []
+    for (const param in obj.parameters) {
+        args.push(param)
+    }
+
+    editor.pasteCode(`${name}(${args.join(", ")})`)
+}
+
+const fixValue = (language: Language, value: string) => language !== "python" && ["True", "False"].includes(value) ? value.toLowerCase() : value
+
+// Main point of this module.
+const Entry = ({ name, obj }: { name: string, obj: APIItem & { details?: boolean } }) => {
+    // TODO don't mutate obj.details
+    const { t } = useTranslation()
+    const forceUpdate = useForceUpdate()
+    const tabsOpen = !!useSelector(tabs.selectOpenTabs).length
+    const language = useSelector(selectScriptLanguage)
+
+    const returnText = "Returns: " + (obj.returns ? `(${t(obj.returns.typeKey)}) - ${t(obj.returns.descriptionKey)}` : "undefined")
+    return (
+        <div className="p-3 border-b border-r border-black border-gray-500 dark:border-gray-700">
+            <div className="flex justify-between mb-2">
+                <span
+                    className="font-bold cursor-pointer truncate" title={returnText}
+                    onClick={() => { obj.details = !obj.details; forceUpdate(); addUIClick("api read - " + name) }}
+                >
+                    {name}
+                </span>
+                <div className="flex">
+                    <button
+                        className={`hover:bg-gray-200 active:bg-gray-300 h-full pt-1 mr-2 scale:text-xs rounded-full scale:px-2.5 border border-gray-600 ${tabsOpen ? "" : "hidden"}`}
+                        onClick={() => { paste(name, obj); addUIClick("api copy - " + name) }}
+                        title={t("api:pasteToCodeEditor", { name })}
+                        aria-label={t("api:pasteToCodeEditor", { name })}>
+                        <i className="icon icon-paste2" />
+                    </button>
+                    <button className="hover:bg-gray-200 active:bg-gray-300 h-full scale:text-sm rounded-full pl-1.5 border border-gray-600 whitespace-nowrap"
+                        onClick={() => { obj.details = !obj.details; forceUpdate(); addUIClick("api read - " + name) }}
+                        title={obj.details ? t("ariaDescriptors:api.closeFunctionDetails", { functionName: name }) : t("ariaDescriptors:api.openFunctionDetails", { functionName: name })}
+                        aria-label={`${obj.details ? t("ariaDescriptors:api.closeFunctionDetails", { functionName: name }) : t("ariaDescriptors:api.openFunctionDetails", { functionName: name })}`}>
+                        <div className="inline-block scale:w-10">{obj.details ? t("api:close") : t("api:open")}</div>
+                        <i className={`inline-block align-middle mb-px mx-1 icon icon-${obj.details ? "arrow-down" : "arrow-right"}`} />
+                    </button>
+                </div>
+            </div>
+            {obj.parameters
+                ? (<div className="scale:text-xs font-light break-word relative">
+                    <span className="sr-only">{t("api:parameters")}:</span>
+                    <span className="px-1">(</span>
+                    {Object.entries(obj.parameters).map(([param, paramVal]: [string, APIParameter]) => (
+                        <span key={param}>
+                            <span title={`${param} (${t(paramVal.typeKey)}) - ${t(paramVal.descriptionKey)}`}>{param}</span>
+                            {paramVal.default !== undefined &&
+                            <span>
+                                <span className="text-gray-600 px-1">=</span>
+                                <span className="text-blue-600">{fixValue(language, paramVal.default)}</span>
+                            </span>}
+                        </span>
+                    )).reduce((prev: any, curr: any): any => [prev, <span key={prev.key + "-comma"}> , </span>, curr])}
+                    <span className="px-1">)</span>
+                </div>)
+                : (<div className="scale:text-xs font-light">{t("api:noparams")}</div>)}
+            {obj.details && <Details obj={obj} />}
+        </div>
+    )
+}
+
+const Details = ({ obj }: { obj: APIItem }) => {
+    const language = useSelector(selectScriptLanguage)
+    const { t } = useTranslation()
+
+    return (
+        <div className="border-t border-gray-500 mt-2 pt-1 scale:text-sm">
+            <span dangerouslySetInnerHTML={{ __html: t(obj.descriptionKey) }} />
+            {obj.parameters &&
+            <div className="mt-4">
+                <h3 className="font-bold">{t("api:parameters")}</h3>
+                {Object.entries(obj.parameters).map(([param, paramVal]) => (
+                    <div key={param}>
+                        <div className="ml-3 mt-2">
+                            <h4 aria-label={t("ariaDescriptors:api.parameterHeading", { parameterName: param, parameterType: t(paramVal.typeKey) })}>
+                                <span aria-hidden={true} className="font-bold scale:text-sm">{t("api:heading", { headingName: param })}</span>
+                                <span aria-hidden={true} className="text-gray-600 scale:text-sm">{t(paramVal.typeKey)}</span>
+                            </h4>
+
+                            {/* rhythmEffects parameter description has a link to curriculum */}
+                            <div className="scale:text-xs"><span dangerouslySetInnerHTML={{ __html: t(paramVal.descriptionKey) }} /></div>
+
+                            {paramVal.default &&
+                            <div>
+                                <span className="text-black dark:text-white">{t("api:defaultValue")}</span>:&nbsp;
+                                <span className="text-blue-600">{fixValue(language, paramVal.default)}</span>
+                            </div>}
+                        </div>
+                    </div>
+                ))}
+            </div>}
+            {obj.returns &&
+            <div className="mt-4">
+                <h3 aria-label={t("ariaDescriptors:api.returnHeading", { headingName: t("api:returnValue"), headingType: t(obj.returns.typeKey) })}>
+                    <span aria-hidden={true} className="font-bold">{t("api:heading", { headingName: t("api:returnValue") })}</span>
+                    <span aria-hidden={true} className="text-gray-600">{t(obj.returns.typeKey)}</span>
+                </h3>
+                <div className="ml-6">{t(obj.returns.descriptionKey)}</div>
+            </div>}
+            <div className="mt-4">
+                <h3 aria-label={t("ariaDescriptors:api.codeExample")} className="font-bold mb-1">{t("api:example")}</h3>
+                <div>
+                    {/* note: don't indent the tags inside pre's! it will affect the styling */}
+                    {language === "python"
+                        ? <pre className="p-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 rounded-md"><Code source={t(obj.example.pythonKey)} language="python" /></pre>
+                        : <pre className="p-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 rounded-md"><Code source={t(obj.example.javascriptKey)} language="javascript" /></pre>}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+const EntryList = () => {
+    const entries = useSelector(api.selectFilteredEntries)
+    return (<>
+        {entries.map(([name, variants]) => {
+            return variants.map((o: APIItem, index: number) => <Entry key={name + index} name={name} obj={o} />)
+        })}
+    </>)
+}
+
+const APISearchBar = () => {
+    const dispatch = useDispatch()
+    const { t } = useTranslation()
+    const searchText = useSelector(api.selectSearchText)
+    const count = useSelector(api.selectFilteredEntries).length
+    const dispatchSearch = (event: ChangeEvent<HTMLInputElement>) => dispatch(api.setSearchText(event.target.value))
+    const dispatchReset = () => dispatch(api.setSearchText(""))
+    const caiHighlight = useSelector(cai.selectHighlight)
+    const liveMessage = t("searchResults", { count })
+    const props = { searchText, dispatchSearch, dispatchReset, id: "apiSearchBar", aria: t("ariaDescriptors:api.searchBar"), liveMessage, firstResultSelector: "#panel-2 button", highlight: caiHighlight.zone === "apiSearchBar" }
+
+    return <SearchBar {...props} />
+}
+
+export const APIBrowser = () => {
+    return (
+        <>
+            <div className="grow-0 pb-3">
+                <APISearchBar />
+            </div>
+
+            <div className="flex-auto overflow-y-scroll overflow-x-none" role="tabpanel" id={"panel-" + BrowserTabType.API}>
+                <EntryList />
+            </div>
+        </>
+    )
+}

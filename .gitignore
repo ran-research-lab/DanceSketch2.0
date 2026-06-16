@@ -1,0 +1,47 @@
+# Visual Studio
+.vs/
+.vscode/
+
+# IntelliJ IDEA & Fleet
+.idea/
+*.iml
+out/
+.fleet/
+
+# Zed
+/.zed
+
+# Web Client
+node_modules/*
+dist/
+
+# Binaries (non-text)
+*.zip
+*.wav
+!tests/playwright/fixtures/*.wav
+*.reapeaks
+
+# OS generated files
+.DS_Store
+.Spotlight-V100
+.Trash/
+.Trashes/
+*.swp
+ehthumbs.db
+Thumbs.db
+Icon?
+*.icloud
+
+# Recommendation System Files
+EarSketchRecommendations/__pycache__/*
+EarSketchRecommendations/utils
+EarSketchRecommendations/*.txt
+EarSketchRecommendations/*.json
+
+# Test reports
+tests/vitest/reports/
+tests/playwright/test-results/
+tests/playwright/reports/
+playwright-report/
+eslint_report.json
+stats.html
