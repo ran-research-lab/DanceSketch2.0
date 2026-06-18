@@ -154,8 +154,8 @@ const dawSlice = createSlice({
         setAutoScroll(state, { payload }) {
             state.autoScroll = payload
         },
-         // adds task to dance queue
-         addFbxDanceTask(state, { payload }: { payload: { upperMove: string; lowerMove: string; start: number; end: number } }) {
+        // adds task to dance queue
+        addFbxDanceTask(state, { payload }: { payload: { upperMove: string; lowerMove: string; start: number; end: number } }) {
             const id = state.nextFbxDanceId++
             state.fbxDanceTasks.push({ id, ...payload })
         },
@@ -165,9 +165,10 @@ const dawSlice = createSlice({
             state.fbxDanceTasks = state.fbxDanceTasks.filter((t) => t.id !== payload)
         },
 
-        // clears dance queue
+        // clears dance queue and resets ID counter
         clearFbxDanceTasks(state) {
             state.fbxDanceTasks = []
+            state.nextFbxDanceId = 1
         },
 
         // sets avatar for animation presentation

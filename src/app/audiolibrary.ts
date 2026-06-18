@@ -146,6 +146,10 @@ async function _getStandardSounds() {
         return { sounds, folders }
     } catch (err: any) {
         esconsole("HTTP status: " + err.status, ["error", "audiolibrary"])
+        // If it's a raw network TypeError, rethrow as a NetworkError so the runner and console handle it correctly.
+        if (err instanceof TypeError && err.message === "Failed to fetch") {
+            throw new Error("NetworkError: Could not connect to EarSketch servers. Check your internet connection and try running again.")
+        }
         throw err
     }
 }
@@ -175,7 +179,14 @@ export async function getMetadata(name: string) {
 
 async function _getMetadata(name: string) {
     const url = URL_DOMAIN + "/audio/metadata?" + new URLSearchParams({ name })
-    const response = await fetch(url)
+    let response: Response
+    try {
+        response = await fetch(url)
+    } catch (err) {
+        // Network failure: clear cache so future calls can retry.
+        delete cache.sounds[name]
+        throw new Error(`NetworkError: Could not connect to EarSketch servers. Check your internet connection and try running again.`)
+    }
     const text = await response.text()
     if (!text) {
         // Server returns 200 OK + empty string for invalid keys, which breaks JSON parsing.

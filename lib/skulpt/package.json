@@ -1,4 +1,7 @@
 {
   "name": "skulpt",
-  "main": "./main.js"
+  "main": "./main.js",
+  "dependencies": {
+    "skulpt": "^1.2.0"
+  }
 }

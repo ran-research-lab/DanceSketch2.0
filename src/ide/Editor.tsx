@@ -219,11 +219,21 @@ const dontComplete = {
 
 ;(async () => {
     // Set up more completions (standard sounds & folders, which are fetched over network) asynchronously.
-    const { sounds, folders } = await audio.getStandardSounds()
-    autocompletions.push(...folders.map(label => ({ label, type: "constant", detail: "Folder constant" })))
-    autocompletions.push(...sounds.map(({ name: label }) => ({ label, type: "constant", detail: "Sound constant" })))
-    pythonCompletions = completeFromList(pythonFunctions.concat(autocompletions))
-    javascriptCompletions = completeFromList(javascriptFunctions.concat(autocompletions))
+    // Retry a few times in case the server is temporarily unreachable on startup.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const { sounds, folders } = await audio.getStandardSounds()
+            autocompletions.push(...folders.map(label => ({ label, type: "constant", detail: "Folder constant" })))
+            autocompletions.push(...sounds.map(({ name: label }) => ({ label, type: "constant", detail: "Sound constant" })))
+            pythonCompletions = completeFromList(pythonFunctions.concat(autocompletions))
+            javascriptCompletions = completeFromList(javascriptFunctions.concat(autocompletions))
+            break
+        } catch {
+            if (attempt < 2) {
+                await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)))
+            }
+        }
+    }
 })()
 
 let autocompleteEnabled = true

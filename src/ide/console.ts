@@ -26,6 +26,10 @@ export function error(error: string | Error) {
 // Elaborate error messages printed to the user console. Available cases based on Skulpt's error messages and Node.js's errors.
 export function elaborate(error: string | Error) {
     const msg = error.toString()
+    // Detect "Failed to fetch" TypeErrors (raw network failures) and treat them as NetworkErrors.
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+        return "NetworkError: " + i18n.t("console:errors.NetworkError")
+    }
     const parts = msg.split(":")
     switch (parts[0]) {
         // Generic & Python-specific errors from Skulpt (errors.js)

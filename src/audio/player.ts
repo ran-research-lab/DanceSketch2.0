@@ -66,6 +66,11 @@ export function play(startMes: number, delay = 0) {
     const endTime = tempoMap.measureToTime(endMes)
     const waStartTime = context.currentTime + delay
 
+    // Hardware output latency: audio is scheduled at waStartTime but heard outputLatency seconds later.
+    // Delay the visual start (onStartedCallback + position tracking) by the same amount so they stay in sync.
+    const outputLatency = (context as any).outputLatency ?? context.baseLatency ?? 0
+    const visualStartTime = waStartTime + outputLatency
+
     // construct webaudio graph
     if (upcomingProjectGraph) clearAudioGraph(upcomingProjectGraph)
     upcomingProjectGraph = {
@@ -88,7 +93,8 @@ export function play(startMes: number, delay = 0) {
     timers.playStart = window.setTimeout(() => {
         playbackData.startMeasure = startMes
         playbackData.endMeasure = endMes
-        playbackData.waStartTime = waStartTime
+        // Use visualStartTime so getPosition() returns 0 at the moment audio is first heard
+        playbackData.waStartTime = visualStartTime
 
         if (projectGraph) clearAudioGraph(projectGraph)
         projectGraph = upcomingProjectGraph
@@ -99,7 +105,7 @@ export function play(startMes: number, delay = 0) {
             const loopStart = loop.selection ? loop.start : 1
             play(loopStart, endTime - startTime - timeElapsed)
         }
-    }, delay * 1000)
+    }, (delay + outputLatency) * 1000)
 
     // schedule to call the onFinished callback
     window.clearTimeout(timers.playEnd)

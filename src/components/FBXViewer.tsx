@@ -36,7 +36,7 @@ const FBXViewer: React.FC = () => {
     const avatarFbxName = avatar?.fbxName || AVATAR_FBX_NAME
     const { width } = useScreenSize()
 
-    const [position, setPosition] = useState(0)
+    const [position, setPosition] = useState(() => player.getPosition())
     const [avatarReady, setAvatarReady] = useState(false)
 
     const containerRef = useRef<HTMLDivElement>(null)
@@ -201,6 +201,9 @@ const FBXViewer: React.FC = () => {
     // Poll playback position
     useEffect(() => {
         if (!playing) return
+
+        // Sync immediately so animation starts in the same frame as audio
+        setPosition(player.getPosition())
 
         const interval = setInterval(() => {
             setPosition(player.getPosition())
@@ -384,34 +387,62 @@ const FBXViewer: React.FC = () => {
         return () => {
             cancelled = true
         }
-    }, [shouldShow, upperFbxName, lowerFbxName, avatarReady,activeTask?.id])
+    }, [shouldShow, upperFbxName, lowerFbxName, avatarReady, activeTask?.id])
 
-    const viewerStyle: React.CSSProperties = {
+    const defaultLeft = Math.max(16, width - 400)
+    const defaultTop = window.innerHeight * 0.5
+
+    const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null)
+    const dragOffset = useRef<{ x: number; y: number } | null>(null)
+
+    const onDragHandlePointerDown = (e: React.PointerEvent) => {
+        e.preventDefault()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        const panelLeft = dragPos?.x ?? defaultLeft
+        const panelTop = dragPos?.y ?? defaultTop
+        dragOffset.current = { x: e.clientX - panelLeft, y: e.clientY - panelTop }
+    }
+
+    const onDragHandlePointerMove = (e: React.PointerEvent) => {
+        if (!dragOffset.current) return
+        setDragPos({
+            x: e.clientX - dragOffset.current.x,
+            y: e.clientY - dragOffset.current.y,
+        })
+    }
+
+    const onDragHandlePointerUp = () => {
+        dragOffset.current = null
+    }
+
+    const panelLeft = dragPos?.x ?? defaultLeft
+    const panelTop = dragPos?.y ?? defaultTop
+
+    const wrapperStyle: React.CSSProperties = {
+        position: "fixed",
+        left: panelLeft,
+        top: panelTop,
         width: 320,
-        height: 420,
-        left: Math.max(16, width - 400),
-        bottom: "20%",
+        zIndex: 50,
     }
 
-    if (!shouldShow) {
-        return (
+    const panel = (
+        <div style={wrapperStyle} className="rounded-lg overflow-hidden shadow-lg border border-gray-700"
+            aria-label={shouldShow ? `Dance animation: upper ${upperFbxName}, lower ${lowerFbxName}` : "Dance animation (idle)"}>
+            {/* Drag handle */}
             <div
-                ref={containerRef}
-                className="fixed z-50 rounded-lg overflow-hidden shadow-lg border border-gray-700"
-                style={viewerStyle}
-                aria-label="Dance animation (idle)"
-            />
-        )
-    }
-
-    return (
-        <div
-            ref={containerRef}
-            className="fixed z-50 rounded-lg overflow-hidden shadow-lg border border-gray-700"
-            style={viewerStyle}
-            aria-label={`Dance animation: upper ${upperFbxName}, lower ${lowerFbxName}`}
-        />
+                onPointerDown={onDragHandlePointerDown}
+                onPointerMove={onDragHandlePointerMove}
+                onPointerUp={onDragHandlePointerUp}
+                style={{ cursor: dragOffset.current ? "grabbing" : "grab", height: 20, background: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center" }}
+            >
+                <div style={{ width: 40, height: 4, borderRadius: 2, background: "#64748b" }} />
+            </div>
+            <div ref={containerRef} style={{ width: 320, height: 420 }} />
+        </div>
     )
+
+    return panel
 }
 
 export default FBXViewer

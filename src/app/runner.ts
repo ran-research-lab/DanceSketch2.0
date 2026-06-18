@@ -14,6 +14,8 @@ import { postRun } from "./postRun"
 import { Language } from "common"
 import { DANCE_MOVE_CONSTANTS } from "../dance/danceConstants"
 import { AVATAR_CONSTANTS } from "../dance/avatarConstants"
+import store from "../reducers"
+import { clearFbxDanceTasks } from "../daw/dawState"
 
 // For interrupting the currently-executing script.
 let pendingCancel = false
@@ -32,6 +34,7 @@ const YIELD_TIME_MS = 100
 
 export async function run(language: Language, code: string) {
     pendingCancel = false // Clear any old, pending cancellation.
+    store.dispatch(clearFbxDanceTasks()) // Clear dance queue from previous run before executing new script.
     const result = await (language === "python" ? runPython : runJavaScript)(code)
     esconsole("Performing post-execution steps.", ["debug", "runner"])
     await postRun(result)
@@ -68,14 +71,25 @@ function handleAvatarConstantsPython() {
 
 async function handleSoundConstantsPython(code: string) {
     // First, inject sound constants that refer to folders, since the server doesn't handle them on the metadata endpoint.
-    for (const constant of (await audioLibrary.getStandardSounds()).folders) {
+    // Gracefully skip folder injection if the sound library fetch fails (e.g., network issue on startup).
+    let folders: string[] = []
+    try {
+        folders = (await audioLibrary.getStandardSounds()).folders
+    } catch {
+        esconsole("Failed to fetch standard sounds; skipping folder constant injection.", ["warn", "runner"])
+    }
+    for (const constant of folders) {
         Sk.builtins[constant] = Sk.ffi.remapToPy(constant)
     }
+
+    // Dance move and avatar constants match the ALL_CAPS pattern but are not audio sounds.
+    // Skip metadata lookup for them — they will be injected by handleDanceMoveConstantsPython/handleAvatarConstantsPython.
+    const knownNonSoundConstants = new Set([...Object.keys(DANCE_MOVE_CONSTANTS), ...Object.keys(AVATAR_CONSTANTS)])
 
     const finder = new SoundConstantFinder()
     const parse = Sk.parse("<analyzer>", code)
     finder.visit(Sk.astFromParse(parse.cst, "<analyzer>", parse.flags))
-    const possibleSoundConstants = finder.constants.filter(c => Sk.builtins[c] === undefined)
+    const possibleSoundConstants = finder.constants.filter(c => Sk.builtins[c] === undefined && !knownNonSoundConstants.has(c))
 
     const sounds = await Promise.all(possibleSoundConstants.map(audioLibrary.getMetadata))
     for (const sound of sounds) {
@@ -217,8 +231,15 @@ async function runPython(code: string) {
 // Searches for identifiers that might be sound constants, verifies with the server, and inserts into globals.
 async function handleSoundConstantsJavaScript(code: string, interpreter: any) {
     // First, inject sound constants that refer to folders, since the server doesn't handle them on the metadata endpoint.
+    // Gracefully skip folder injection if the sound library fetch fails (e.g., network issue on startup).
     const scope = interpreter.getScope().object
-    for (const constant of (await audioLibrary.getStandardSounds()).folders) {
+    let folders: string[] = []
+    try {
+        folders = (await audioLibrary.getStandardSounds()).folders
+    } catch {
+        esconsole("Failed to fetch standard sounds; skipping folder constant injection.", ["warn", "runner"])
+    }
+    for (const constant of folders) {
         interpreter.setProperty(scope, constant, constant)
     }
 
@@ -232,7 +253,9 @@ async function handleSoundConstantsJavaScript(code: string, interpreter: any) {
         },
     })
 
-    const possibleSoundConstants = constants.filter(c => interpreter.getProperty(scope, c) === undefined)
+    // Skip dance move and avatar constants — they match the ALL_CAPS pattern but are not audio sounds.
+    const knownNonSoundConstants = new Set([...Object.keys(DANCE_MOVE_CONSTANTS), ...Object.keys(AVATAR_CONSTANTS)])
+    const possibleSoundConstants = constants.filter(c => interpreter.getProperty(scope, c) === undefined && !knownNonSoundConstants.has(c))
 
     const sounds = await Promise.all(possibleSoundConstants.map(audioLibrary.getMetadata))
     for (const sound of sounds) {
